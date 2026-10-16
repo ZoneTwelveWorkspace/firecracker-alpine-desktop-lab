@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+install -d -m 0700 /run/user/0
+export HOME=/root
+export XDG_RUNTIME_DIR=/run/user/0
+export WAYLAND_DISPLAY=wayland-1
+export WLR_BACKENDS=headless
+export WLR_RENDERER=pixman
+export WLR_HEADLESS_OUTPUTS=1
+export WLR_LIBINPUT_NO_DEVICES=1
+export XDG_SESSION_TYPE=wayland
+export MOZ_ENABLE_WAYLAND=1
+
+dbus-run-session -- sway -d -c /etc/sway/config >>/var/log/wayland.log 2>&1 &
+for _ in $(seq 1 100); do
+  [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break
+  sleep 0.1
+done
+wayvnc --log-level=debug --config=/dev/null --output=HEADLESS-1 \
+  --render-cursor 0.0.0.0:5900 \
+  >>/var/log/wayvnc.log 2>&1 &

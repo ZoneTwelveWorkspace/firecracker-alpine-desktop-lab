@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+page=/var/www/tictactoe/index.html
+
+IFS= read -r request || exit 0
+while IFS= read -r header; do
+  [ "$header" = "$(printf '\r')" ] && break
+  [ -z "$header" ] && break
+done
+
+content_length="$(wc -c < "$page" | tr -d ' ')"
+printf 'HTTP/1.1 200 OK\r\n'
+printf 'Content-Type: text/html; charset=utf-8\r\n'
+printf 'Content-Length: %s\r\n' "$content_length"
+printf 'Cache-Control: no-store\r\n'
+printf 'Connection: close\r\n'
+printf 'X-VM-Service: alpine-tictactoe\r\n'
+printf '\r\n'
+
+case "$request" in
+  HEAD\ *) ;;
+  *) cat "$page" ;;
+esac

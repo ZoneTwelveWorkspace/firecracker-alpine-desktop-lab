@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+INSTANCE="${FIRECRACKER_LIMA_INSTANCE:-firecracker-alpine}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./lab <setup|build|up|down|status|update-desktop|set-mirror|novnc|diagnose|vnc-test|capture|open|open-web|open-game|ssh|logs> [alpine-1|alpine-2]
+EOF
+}
+
+is_macos() {
+  [[ "$(uname -s)" == "Darwin" ]]
+}
+
+need_lima() {
+  if ! command -v limactl >/dev/null 2>&1; then
+    echo "Lima is required. Install it with: brew install lima" >&2
+    exit 1
+  fi
+}
+
+lima_running() {
+  limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
+    | grep -q "^${INSTANCE} Running$"
+}
+
+ensure_lima() {
+  need_lima
+  if lima_running; then
+    return
+  fi
+
+  if limactl list --format '{{.Name}}' 2>/dev/null | grep -qx "$INSTANCE"; then
+    limactl start "$INSTANCE"
+  else
+    limactl start --name "$INSTANCE" --vm-type vz --cpus 6 --memory 10 \
+      --disk 30 --nested-virt template://ubuntu-24.04
+  fi
+}
+
+ensure_ssh_key() {
+  mkdir -p "$ROOT/state"
+  if [[ ! -f "$ROOT/state/id_ed25519" ]]; then
+    ssh-keygen -q -t ed25519 -N "" -C "firecracker-alpine-lab" \
+      -f "$ROOT/state/id_ed25519"
+  fi
+}
+
+linux_script() {
+  local script="$1"
+  shift
+  if is_macos; then
+    ensure_lima
+    limactl shell --workdir "$ROOT" "$INSTANCE" -- \
+      bash "./scripts/linux/${script}" "$@"
+  else
+    bash "$ROOT/scripts/linux/${script}" "$@"
+  fi
+}
+
+vm_port() {
+  case "${1:-alpine-1}" in
+    alpine-1) echo 5901 ;;
+    alpine-2) echo 5902 ;;
+    *) echo "Unknown VM: $1" >&2; exit 2 ;;
+  esac
+}
+
+web_port() {
+  case "${1:-alpine-1}" in
+    alpine-1) echo 6081 ;;
+    alpine-2) echo 6082 ;;
+    *) echo "Unknown VM: $1" >&2; exit 2 ;;
+  esac
+}
+
+game_port() {
+  case "${1:-alpine-1}" in
+    alpine-1) echo 8081 ;;
+    alpine-2) echo 8082 ;;
+    *) echo "Unknown VM: $1" >&2; exit 2 ;;
+  esac
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  setup)
+    if is_macos; then
+      ensure_lima
+    fi
+    linux_script bootstrap.sh
+    ;;
+  build)
+    ensure_ssh_key
+    linux_script bootstrap.sh
+    linux_script build.sh
+    ;;
+  up)
+    linux_script up.sh
+    ;;
+  down)
+    linux_script down.sh
+    ;;
+  status)
+    linux_script status.sh
+    ;;
+  update-desktop)
+    linux_script update-desktop.sh
+    ;;
+  set-mirror)
+    linux_script set-mirror.sh
+    ;;
+  novnc)
+    linux_script novnc.sh
+    ;;
+  diagnose)
+    linux_script diagnose.sh "${1:-alpine-1}"
+    ;;
+  vnc-test)
+    vm="${1:-alpine-1}"
+    port="$(vm_port "$vm")"
+    python3 "$ROOT/scripts/vnc_probe.py" --port "$port"
+    ;;
+  capture)
+    vm="${1:-alpine-1}"
+    port="$(vm_port "$vm")"
+    output="${2:-$ROOT/state/screenshots/$vm.png}"
+    python3 "$ROOT/scripts/vnc_probe.py" --port "$port" --output "$output"
+    ;;
+  open)
+    vm="${1:-alpine-1}"
+    port="$(vm_port "$vm")"
+    if ! is_macos; then
+      echo "Connect a VNC viewer to 127.0.0.1:${port}"
+      exit 0
+    fi
+    open "vnc://127.0.0.1:${port}"
+    ;;
+  open-web)
+    vm="${1:-alpine-1}"
+    port="$(web_port "$vm")"
+    url="http://127.0.0.1:${port}/vnc.html?autoconnect=true&resize=scale"
+    if ! is_macos; then
+      echo "$url"
+      exit 0
+    fi
+    open "$url"
+    ;;
+  open-game)
+    vm="${1:-alpine-1}"
+    port="$(game_port "$vm")"
+    url="http://127.0.0.1:${port}/"
+    if ! is_macos; then
+      echo "$url"
+      exit 0
+    fi
+    open "$url"
+    ;;
+  ssh)
+    vm="${1:-alpine-1}"
+    case "$vm" in
+      alpine-1) port=2221 ;;
+      alpine-2) port=2222 ;;
+      *) echo "Unknown VM: $vm" >&2; exit 2 ;;
+    esac
+    key="$ROOT/state/id_ed25519"
+    if [[ ! -f "$key" ]]; then
+      echo "Missing SSH key. Run ./lab build first." >&2
+      exit 1
+    fi
+    exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -i "$key" -p "$port" root@127.0.0.1
+    ;;
+  logs)
+    linux_script logs.sh "${1:-alpine-1}"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
